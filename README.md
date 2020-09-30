@@ -1,5 +1,5 @@
 # AMVAR
-Adaptive Multivariate AutoRegregression for spectral analysis
+Adaptive Multivariate AutoRegression for spectral analysis
 - an alternative to Fourier analysis as it allows for BOTH, high spectral AND temporal resolution
 - particularly useful when many multiple trials are present
 - implemented using the least-squares method
