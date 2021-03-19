@@ -23,7 +23,7 @@ plt.show()
 #2. to decide on window width and order, look at the AIC of an exemplary window --> try to minimize the AIC
 ww_test = [10,20] #window width you want to test
 orders_test = np.arange(1,8) #orders you want to test
-aic_dict = amvar.get_AICdict(datamat,ww_test,orders_test, winstart=0, method='lsq')#performs it in one window starting as indicated by pts winstart
+aic_dict = amvar.get_AICdict(datamat,ww_test,orders_test, winstart=0, method='lsq')#calculates aic in one window starting as indicated by pts winstart
 f,ax = plt.subplots()
 ax.plot(orders_test,aic_dict['aic'][10],'b')
 ax.plot(orders_test,aic_dict['aic'][20],'g')
