@@ -6,7 +6,7 @@ from functools import reduce
 
 ##########CALCULATING AR COEFFICIENTS, NOISE COVARIANCE AND SPECTRAL MATRICES
 
-def run_ar(datachunks, order=5, ww=20, algo='lsq', sr=500, upperfreq=100, fresol=0.1,**kwargs):
+def run_ar(datachunks, order=5, ww=20, algo='lsq', sr=500, upperfreq=100, fresol=0.1,print_on=True,**kwargs):
 	'''datachunks is in (nchans,ntrials,dpoints)'''
 
 	jump_step = kwargs['step'] if 'step' in kwargs else int(ww / 2.)
@@ -14,8 +14,9 @@ def run_ar(datachunks, order=5, ww=20, algo='lsq', sr=500, upperfreq=100, fresol
 
 	n_chans = datachunks.shape[0]
 
-	print	('###############################################')
-	print	('INPUT DATA    {0} channels, {1} trials, {2} points'.format(*[x for x in datachunks.shape]))
+	if print_on:
+		print	('###############################################')
+		print	('INPUT DATA    {0} channels, {1} trials, {2} points'.format(*[x for x in datachunks.shape]))
 
     # preprocessing: zscoring
 	data_z = z_score(datachunks)
@@ -29,11 +30,12 @@ def run_ar(datachunks, order=5, ww=20, algo='lsq', sr=500, upperfreq=100, fresol
 	allARs = np.zeros((nwins, order + 1, n_chans, n_chans), dtype='complex')
 	allEAs = np.zeros((nwins, n_chans, n_chans), dtype='complex')
 	allSMs = np.zeros((nwins, len(freqVec), n_chans, n_chans), dtype='complex')
-	print ('AR-MODEL    order{0}    ww{1}    step{4}    sr{2}    chunkshape{3}    wins{5}'. \
+	if print_on: print ('AR-MODEL    order{0}    ww{1}    step{4}    sr{2}    chunkshape{3}    wins{5}'. \
 		format(order, ww, sr, data_z.shape, jump_step, nwins))
 
 	for ss, winstart in enumerate(winstarts):
-		if np.mod(ss, 50) == 0:
+		if np.mod(ss, 50) == 0 and print_on\
+				:
 			print ('window number', ss, ctime())
 
 		snipInput = data_z[:, :, winstart:winstart + ww].transpose((1, 0, 2))[:]
@@ -56,7 +58,9 @@ def getArEa(data, order, method='lsq'):
 	'''data is (trials,channels,points)'''
 
 	if method == 'yw':
-		print ('obtainable upon request')
+		#print ('obtainable upon request')
+		meanR = getMeanRMatrices(data,order)
+		EA,ARs = findARCoeffs(meanR)
 
 	elif method == 'lsq':
 
@@ -194,6 +198,137 @@ def getNoiseCovarianceMatrix(residWin):
 		meanCov = meanCov.reshape(1, 1)
 
 	return meanCov, covTrials
+
+
+
+##############YULE-WALKER FNS
+
+def getRMatrices(data_trace, maxOrd):
+	'''calculates covariance matrices from single trial data (shape:(channel,datapoints))
+    according to Ding et al.(1999)
+    input:single trial data (shape:(channel,datapoints), maximal lag;
+    output: array of covariance 'matrices'(arrays) shape:(maxlag+1,channels,channels)'''
+	from numpy import matrix, zeros, dot, sum
+
+	nbOfChannels = len(data_trace)
+	data_points = len(data_trace[0])
+	# print data_points
+	dataMat = matrix(data_trace)
+
+	covMatr = zeros((maxOrd + 1, nbOfChannels, nbOfChannels))
+
+	for ii in range(maxOrd + 1):
+		tempMat = zeros((nbOfChannels, nbOfChannels))
+		# print data_points,data_points-ii
+		for jj in range(data_points - ii):
+			tempMat += dot(dataMat[:, jj], dataMat[:, jj + ii].T)
+		# print 'TT',ii,tempMat.shape
+		covMatr[ii] = 1. / (data_points - ii) * tempMat
+	return covMatr
+
+
+def getMeanRMatrices(trialsData, maxOrd):
+	'''calculates for single window data mean arCoeff, making use of getRMatrices;
+    input:single window data(shape(trials,channels,datapoints)),maxlag (order)
+    output:trial-mean covariance 'matrices'(arrays)(shape(maxlag+1,channels,channels))'''
+
+	from numpy import mean
+
+	RMatrList = ([])
+	nbOfTrials = len(trialsData)
+	for ii in range(nbOfTrials):
+		# print ii
+		RMatrList.append(getRMatrices(trialsData[ii], maxOrd))
+	return mean(RMatrList, 0)
+
+
+def findARCoeffs(covMatr):
+	'''calculates AR coefficients from covariance matrices using multivariate
+    levinson-durbin recursion.
+    input:covariance 'matrices'(arrays) for a single window(shape(maxlag+1,channels,channels),like from getMeanRMatrices)
+    output: EA(shape(channels,channels)),ARCoeffs(shape(maxlag+1,channels,channels));
+    please note: ARCoeffs[0] is identiy matrix(needed for calculating spectral matrices)
+    '''
+
+	from numpy import zeros, matrix, dot, linalg, reshape, size, array, eye
+
+	ord_num = len(covMatr) - 1
+	ajdim = len(covMatr[0])
+	R = covMatr.copy()
+
+	toeplitz = zeros((ord_num, ord_num, ajdim, ajdim))
+	for ii in range(ord_num):
+		for jj in range(ord_num):
+			if (ii - jj) < 0:
+				toeplitz[ii, jj, :, :] = matrix(-R[abs(ii - jj)])
+			else:
+				toeplitz[ii, jj, :, :] = matrix(-R[(ii - jj)]).transpose()
+	# eaList=([])
+	A = zeros((1, ajdim, ajdim))
+	A[0, :, :] = dot(linalg.inv(matrix(toeplitz[0, 0, :, :])), R[1, :, :])
+
+	if (ord_num != 1.):
+
+		B = zeros((1, ajdim, ajdim))
+		B[0, :, :] = matrix(dot(linalg.inv(toeplitz[0, 0, :, :]), matrix(R[1, :, :].transpose())))
+
+		ww = 2
+		while ww <= ord_num:
+			vv = 0
+			oo = 0
+			alpha_sigma_pre = zeros((ww - 1, ajdim, ajdim))
+			alpha_luis_pre = zeros((ww - 1, ajdim, ajdim))
+			beta_sigma_pre = zeros((ww - 1, ajdim, ajdim))
+			beta_luis_pre = zeros((ww - 1, ajdim, ajdim))
+			while vv <= (ww - 2):
+				alpha_sigma_pre[vv, :, :] = dot(toeplitz[0, ww - vv - 1, :, :], B[vv, :, :])  # ok
+				alpha_luis_pre[vv, :, :] = dot(toeplitz[0, ww - vv - 1, :, :], A[vv, :, :])
+				beta_sigma_pre[vv, :, :] = dot(-matrix(R[vv + 1]).transpose(), A[vv, :, :])  # ok
+				beta_luis_pre[vv, :, :] = dot(-matrix(R[vv + 1]).transpose(), B[vv, :, :])  # ok
+				vv = vv + 1
+			alpha_sigma = linalg.inv(toeplitz[0, 0, :, :] + sum(alpha_sigma_pre))  # ok
+			# eaList.append(linalg.inv(alpha_sigma))
+			alpha_luis = -(-R[ww] + sum(alpha_luis_pre))  # ok
+			beta_sigma = linalg.inv(toeplitz[0, 0, :, :] + sum(beta_sigma_pre))  # ok
+			beta_luis = -(-R[ww].transpose() + sum(beta_luis_pre))  # ok
+			B_new = zeros((ww, ajdim, ajdim))  # ok
+			B_new[0, :, :] = dot(beta_sigma, beta_luis)  # ok
+			for ll in range(1, ww):  # ok
+				B_new[ll, :, :] = B[ll - 1, :, :] + dot(A[ll - 1, :, :], B_new[0, :, :])  # ok
+			A_new = zeros((ww, ajdim, ajdim))  # ok
+			A_new[ww - 1, :, :] = dot(alpha_sigma, alpha_luis)  # ok
+			for ii in range(ww - 1):  # ok
+				A_new[ii, :, :] = A[ii, :, :] + dot(B[ii, :, :], A_new[ww - 1, :, :])  # ok
+			B = B_new  # ok
+			A = A_new  # ok
+			ww = ww + 1  # ok
+		AR = zeros((ord_num, ajdim, ajdim))
+		for zz in range(ord_num):
+			AR[zz, :, :] = dot(matrix(R[zz + 1, :, :]).transpose(), matrix(A[zz, :, :]))
+		E = zeros((1, ajdim, ajdim))
+		E = matrix(R[0]) + matrix(sum(AR))
+	else:
+		E = zeros((1, ajdim, ajdim))
+		E = zeros((1, ajdim, ajdim))
+		E2 = matrix(R[0]) + dot(matrix(A[0]).transpose(), matrix(R[1]))
+
+	ARCoeffs = zeros((ord_num + 1, ajdim, ajdim))
+	ARCoeffs[0] = eye(ajdim)
+	ARCoeffs[1:] = threeDTranspose(A)
+	return E, ARCoeffs  # ,eaList
+
+def threeDTranspose(myArray):
+	#todo replace by simpler fn
+    '''used in findARCoeffs to transpose the 2nd and 3rd dimension(which have
+        the same number of elements) of a 3d matrix
+    '''
+    from numpy import array,zeros,shape,transpose
+
+    newArray=zeros(shape(myArray))
+    rownum=len(myArray)
+    for ii in range(rownum):
+        newArray[ii]=transpose(myArray[ii])
+    return newArray
 
 
 ############## DERIVING SPECTRAL QUANTITIES
