@@ -65,8 +65,8 @@ jump_step = np.int(ww/2.)
 #look at spectral flavors available
 print (amvar.spectral_flavor_fns.keys())
 #select eg power
-flavor = 'coherence_phase'
-chans = [0,1] # for e.g. coherence it would be chans = [0,1]
+flavor = 'power'
+chans = [0,0] # for e.g. coherence it would be chans = [0,1]
 spgrm = amvar.get_spectrogram(sm, chs=chans, flavour=flavor) #eg coherence between channels 0 and 1
 
 # plot the spectrogram
