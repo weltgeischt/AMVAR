@@ -18,7 +18,7 @@ def run_ar(datachunks, order=5, ww=20, algo='lsq', sr=500, upperfreq=100, fresol
 		print	('###############################################')
 		print	('INPUT DATA    {0} channels, {1} trials, {2} points'.format(*[x for x in datachunks.shape]))
 
-    # preprocessing: zscoring
+	# preprocessing: zscoring
 	data_z = z_score(datachunks)
 
 	# setting up sliding window mechanism
@@ -49,7 +49,13 @@ def run_ar(datachunks, order=5, ww=20, algo='lsq', sr=500, upperfreq=100, fresol
 	return [allARs, allEAs], allSMs
 
 def z_score(allchunks):
-	meanchunks, stdchunks = np.mean(allchunks, 1), np.std(allchunks, 1)
+	if type(allchunks) == np.ma.core.MaskedArray:
+		meanfn = np.ma.mean
+		stdfn = np.ma.std
+	else:
+		meanfn = np.mean
+		stdfn = np.std
+	meanchunks, stdchunks = meanfn(allchunks, 1), stdfn(allchunks, 1)
 	data_z = (allchunks - meanchunks[:, None, :]) / stdchunks[:, None, :]
 	return data_z
 
@@ -88,6 +94,7 @@ def calcAR_lsq(dataWin, order):
 	output: ar coefficients (order x chans x chans), residuals (trials, ww-order, channels)
 			fit of leastsquare method (), such that residuals+ fit[:,order:]=dataWin[:,:,order:]
 	'''
+	#exclude trials where the dataWin
 
 	trials = len(dataWin)
 	chans = len(dataWin[0])
@@ -95,8 +102,9 @@ def calcAR_lsq(dataWin, order):
 	resids = ww - order
 
 	arMat = np.zeros((order, chans, chans))
-	residMat = np.zeros((trials, resids, chans))
-	estimatedMat = np.zeros((trials, chans, ww))
+	zerofn = np.zeros if not type(dataWin) == np.ma.core.MaskedArray else np.ma.zeros
+	residMat = zerofn((trials, resids, chans))
+	estimatedMat = zerofn((trials, chans, ww))
 	# print order,chans,trials,ww
 	guessMat = np.ones((order, chans))  # input only what regards value of one channel
 	try:
@@ -106,13 +114,17 @@ def calcAR_lsq(dataWin, order):
 		pass
 
 	guess = guessMat.flatten()
-	for chan in range(chans):
-		# the idea for a multivariate process is to iterate over all possible channel-considered, channels-contributing combinations
-		# print shape(delete(dataWin,chan,1)),shape(guess)
 
-		coeffs, success = optimize.leastsq(mvarErr, guess.copy(),
+	for chan in range(chans):
+		# the idea for a multivariate process is to iterate over all possible channels-considered, channels-contributing combinations
+		# print shape(delete(dataWin,chan,1)),shape(guess)
+		errfn = mvarErr2 if type(dataWin) == np.ma.core.MaskedArray else mvarErr
+
+		coeffs, success = optimize.leastsq(errfn, guess.copy(),
 										   args=(dataWin[:, chan], np.delete(dataWin, chan, 1)))  # ,maxfev=10000
-		# print success
+		#coeffs, success = optimize.curve_fit(mvarFit, dataWin[:, chan], np.delete(dataWin, chan, 1),guess.copy(),nan_policy='omit')  # ,maxfev=10000
+
+		#print (success)
 		# the Coeff of chans influence on the chan is the first one, so it has to be moved to its proper place...
 
 		if type(coeffs) == float: coeffs = np.array(([coeffs]))
@@ -138,41 +150,57 @@ def calcAR_lsq(dataWin, order):
 
 mvarErr = lambda p00,data1,dataArray:(mvarFit(p00,data1,dataArray)+data1).flatten()
 
+def mvarErr2(p00,data1,dataArray):
+	'''error fn for masked data'''
+	myfit = mvarFit(p00,data1,dataArray)
+	cond1 = data1.mask == False
+	cond2 = myfit.mask == False#~np.isnan(myfit)#
+	#print (myfit[cond1 & cond2] +data1[cond1 & cond2])
+	return (myfit[cond1 & cond2] +data1[cond1 & cond2]).flatten()
+
 def mvarFit(p00,data1,dataArray):
-    '''fitfunction for calcAR_lsq
-    input: parameters(arCoeffs with respect to data to be predicted, flattened),
-            data of channel whose value is to be predicted with parameters,
-            other channels of the process that contribute '''
-    trials=len(dataArray)
+	'''fitfunction for calcAR_lsq
+	input: parameters(arCoeffs with respect to data to be predicted, flattened),
+			data of channel whose value is to be predicted with parameters,
+			other channels of the process that contribute '''
+	trials=len(dataArray)
 
-    chans=len(dataArray[0])+1
-    p00=np.array(p00)
+	chans=len(dataArray[0])+1
+	p00=np.array(p00) #parameters
 
-    try: order= np.int(len(p00)/chans)
-    except: order=1
+	try: order= np.int(len(p00)/chans)
+	except: order=1
 
-    ww=len(data1[0])
-    startingPoints=data1[:,:order]
+	ww=len(data1[0])
+	startingPoints=data1[:,:order]
 
-    data=np.zeros((trials,chans,ww))
-    data[:,0]=data1
-    data[:,1:]=dataArray
-    #print ('hey')
-    p=p00.reshape(order,chans)
+	zerofn = np.zeros if not type(data1) == np.ma.core.MaskedArray else np.ma.zeros
 
-    d1 = np.c_[startingPoints,np.zeros((trials,ww-order))]
+	data = zerofn((trials,chans,ww)) #put the data together again data is trails.chans.dpts
+	data[:,0]=data1
+	data[:,1:]=dataArray
+	#print ('hey')
+	p=p00.reshape(order,chans)
 
-    #print(shape(d1))
+	d1 = np.c_[startingPoints,zerofn((trials,ww-order))]
 
-    for trial in np.arange(trials):
-        for ii in np.arange(ww-order):
-            temp=0
-            for chan in np.arange(chans):
-                for ord in np.arange(order):
-                    temp+=p[ord,chan]*data[trial,chan,ii+order-ord-1]
+	#print(shape(d1))
 
-            d1[trial,ii+order]=temp
-    return d1
+	for trial in np.arange(trials):
+		for ii in np.arange(ww-order):
+			temp=0
+			for chan in np.arange(chans):
+				for ord in np.arange(order):
+				   temp += p[ord,chan]*data[trial,chan,ii+order-ord-1]
+
+			d1[trial,ii+order] = temp
+	if type(data) == np.ma.core.MaskedArray:
+		return np.ma.masked_where(np.isnan(d1),d1)
+		#return d1
+		#
+	else:
+		#print ('maxi',d1.max())
+		return d1
 
 
 def getNoiseCovarianceMatrix(residWin):
@@ -183,13 +211,14 @@ def getNoiseCovarianceMatrix(residWin):
 
 	trials = len(residWin)
 	chans = len(residWin[0, 0])
-
+	covfn = np.ma.cov if type(residWin) == np.ma.core.MaskedArray else np.cov
+	meanfn = np.ma.mean if type(residWin) == np.ma.core.MaskedArray else np.mean
 	noiseCovList = ([])
 	for trial in range(trials):
 		trialNoise = residWin[trial, :, :]
-		noiseCov = np.cov(trialNoise.T)  # welll actually not quite..., do it the Ding Way
+		noiseCov = covfn(trialNoise.T)  # welll actually not quite..., do it the Ding Way
 		noiseCovList.append(noiseCov)
-	meanCov = np.mean(noiseCovList, 0)
+	meanCov = meanfn(noiseCovList, 0)
 
 	covTrials = np.array(noiseCovList)
 
@@ -205,9 +234,9 @@ def getNoiseCovarianceMatrix(residWin):
 
 def getRMatrices(data_trace, maxOrd):
 	'''calculates covariance matrices from single trial data (shape:(channel,datapoints))
-    according to Ding et al.(1999)
-    input:single trial data (shape:(channel,datapoints), maximal lag;
-    output: array of covariance 'matrices'(arrays) shape:(maxlag+1,channels,channels)'''
+	according to Ding et al.(1999)
+	input:single trial data (shape:(channel,datapoints), maximal lag;
+	output: array of covariance 'matrices'(arrays) shape:(maxlag+1,channels,channels)'''
 	from numpy import matrix, zeros, dot, sum
 
 	nbOfChannels = len(data_trace)
@@ -229,8 +258,8 @@ def getRMatrices(data_trace, maxOrd):
 
 def getMeanRMatrices(trialsData, maxOrd):
 	'''calculates for single window data mean arCoeff, making use of getRMatrices;
-    input:single window data(shape(trials,channels,datapoints)),maxlag (order)
-    output:trial-mean covariance 'matrices'(arrays)(shape(maxlag+1,channels,channels))'''
+	input:single window data(shape(trials,channels,datapoints)),maxlag (order)
+	output:trial-mean covariance 'matrices'(arrays)(shape(maxlag+1,channels,channels))'''
 
 	from numpy import mean
 
@@ -244,11 +273,11 @@ def getMeanRMatrices(trialsData, maxOrd):
 
 def findARCoeffs(covMatr):
 	'''calculates AR coefficients from covariance matrices using multivariate
-    levinson-durbin recursion.
-    input:covariance 'matrices'(arrays) for a single window(shape(maxlag+1,channels,channels),like from getMeanRMatrices)
-    output: EA(shape(channels,channels)),ARCoeffs(shape(maxlag+1,channels,channels));
-    please note: ARCoeffs[0] is identiy matrix(needed for calculating spectral matrices)
-    '''
+	levinson-durbin recursion.
+	input:covariance 'matrices'(arrays) for a single window(shape(maxlag+1,channels,channels),like from getMeanRMatrices)
+	output: EA(shape(channels,channels)),ARCoeffs(shape(maxlag+1,channels,channels));
+	please note: ARCoeffs[0] is identiy matrix(needed for calculating spectral matrices)
+	'''
 
 	from numpy import zeros, matrix, dot, linalg, reshape, size, array, eye
 
@@ -319,16 +348,16 @@ def findARCoeffs(covMatr):
 
 def threeDTranspose(myArray):
 	#todo replace by simpler fn
-    '''used in findARCoeffs to transpose the 2nd and 3rd dimension(which have
-        the same number of elements) of a 3d matrix
-    '''
-    from numpy import array,zeros,shape,transpose
+	'''used in findARCoeffs to transpose the 2nd and 3rd dimension(which have
+		the same number of elements) of a 3d matrix
+	'''
+	from numpy import array,zeros,shape,transpose
 
-    newArray=zeros(shape(myArray))
-    rownum=len(myArray)
-    for ii in range(rownum):
-        newArray[ii]=transpose(myArray[ii])
-    return newArray
+	newArray=zeros(shape(myArray))
+	rownum=len(myArray)
+	for ii in range(rownum):
+		newArray[ii]=transpose(myArray[ii])
+	return newArray
 
 
 ############## DERIVING SPECTRAL QUANTITIES
@@ -434,11 +463,13 @@ def get_residmat(chan,datamat,ar,ww,jump_step,order):
 	nchans, ntrials, npts = datamat.shape
 	winstarts = np.arange(0, npts - ww + 1, jump_step)
 	nwins = len(winstarts)
-	residmat = np.zeros((nwins, ntrials, ww - order))
+	dataZ = z_data(datamat)
+	zerofn = np.zeros if not type(datamat) == np.ma.core.MaskedArray else np.ma.zeros
+	residmat = zerofn((nwins, ntrials, ww - order))
 	for ii, winstart in enumerate(winstarts):
 		coeffs = ar[ii, 1:, chan, chan]
 		for tt in np.arange(ntrials):
-			datawin = z_data(datamat)[chan, tt, winstart:winstart + ww]
+			datawin = dataZ[chan, tt, winstart:winstart + ww]
 			#print (datawin.shape)
 			residmat[ii, tt, :] = get_residual_win(datawin, coeffs, order)
 
@@ -453,29 +484,42 @@ def single_to_multi(data):
 	return data.reshape((1,) + data.shape)
 
 def get_residual_win(datawin,coeffs,order):
-    '''
-    coeffs is the ar coefficents for that window excluding the first (shape: orderxchanxchan)
-    '''
-    pts_pred = len(datawin)-order
-    expected = datawin[order:]
-    predicted = -np.array([np.dot(datawin[jj:order+jj],coeffs[::-1]) for jj in np.arange(pts_pred)])
-    return np.real(expected-predicted)
+	'''
+	coeffs is the ar coefficents for that window excluding the first (shape: orderxchanxchan)
+	'''
+	pts_pred = len(datawin)-order
+	expected = datawin[order:]
+	dotfn = np.dot if not type(datawin) == np.ma.core.MaskedArray else np.ma.dot
+	predicted = -np.array([dotfn(datawin[jj:order+jj],coeffs[::-1]) for jj in np.arange(pts_pred)])
+	return np.real(expected-predicted)
 
 def plot_residual_mat(residmat, tvec, nbins=50, cmap='gray', ylabel='Residual', xlabel='Time [s]', meancol='pink',
 					  edgeperc=99):
-	from scipy.stats import scoreatpercentile
+	import scipy.stats as ss
 	from matplotlib.pyplot import subplots
 	nwins, ntrials, npts = residmat.shape
-	gaussedge = scoreatpercentile(residmat, edgeperc)
+
+	is_masked = type(residmat) == np.ma.core.MaskedArray
+	scorefn = ss.mstats.scoreatpercentile if is_masked else ss.scoreatpercentile
+	meanfn,stdfn = [np.ma.mean,np.ma.std] if is_masked else [np.mean,np.std]
+
+
+
+	gaussedge = scorefn(residmat.flatten(), edgeperc)
 	resibins = np.linspace(-gaussedge, gaussedge, nbins)
 	bw = np.diff(resibins)[0]
-
 	histmat = np.zeros((nwins, nbins - 1))
-	for ii in np.arange(nwins):
-		histmat[ii], _ = np.histogram(residmat[ii], resibins)
 
-	meanresi = np.mean(residmat.reshape(nwins, -1), axis=1)
-	stdresi = np.std(residmat.reshape(nwins, -1), axis=1)
+	if is_masked:
+		myhistfn = lambda hdata:  np.histogram(hdata, resibins,weights=np.abs(hdata.mask-1))
+	else:
+		myhistfn = lambda hdata:  np.histogram(hdata, resibins)
+
+	for ii in np.arange(nwins):
+		histmat[ii], _ = myhistfn(residmat[ii])
+
+	meanresi = meanfn(residmat.reshape(nwins, -1), axis=1)
+	stdresi = stdfn(residmat.reshape(nwins, -1), axis=1)
 
 	binvec = resibins[1:] - 0.5 * bw
 
@@ -527,3 +571,15 @@ def generate_surrogate(ntrials=100, simdur=1, sr=500):
 		datamat[1,tt,:] = sinewave(time,freq1,off_gen+off1,amp1B) + np.random.normal(0,noiseB,len(time)) + sinewave(time,freq2,off_gen2+off2,amp2B)#chB
 	return datamat
 
+def mask_surrogate(datamat,ntrials,simdur,sr,upper,lower,maskdur):
+	N = np.int(1.4 * ntrials * simdur / np.mean([upper, lower]))  # how many intervals to create
+	imis = np.random.uniform(upper, lower, N)  # inter-mask-intervals
+	maskinds = np.cumsum(imis * sr).astype(int)
+	simdur_pts = sr * simdur
+	for mind in maskinds:
+		trialidx = np.int(np.ceil(mind / simdur_pts))
+		if trialidx >= ntrials:
+			break
+		idx = np.mod(mind, simdur_pts)
+		datamat[:, trialidx, idx:idx + maskdur] = np.nan
+	return np.ma.masked_where(np.isnan(datamat), datamat)
